@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chicken Crossy Road Clone - Visual Hand Tracking</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            font-family: 'Arial', sans-serif;
+            user-select: none;
+        }
+        #game-container {
+            width: 100vw;
+            height: 100vh;
+        }
+        #score-board {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            font-size: 48px;
+            font-weight: bold;
+            color: #374151;
+            z-index: 10;
+            background: rgba(255, 255, 255, 0.6);
+            padding: 5px 20px;
+            border-radius: 10px;
+        }
+        #game-over-screen {
+            display: none;
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: white;
+            padding: 40px;
+            border-radius: 15px;
+            text-align: center;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.2);
+            z-index: 20;
+        }
+        #game-over-screen h1 { margin-top: 0; color: #ef4444; }
+        #restart-btn {
+            background: #10b981;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            font-size: 18px;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+        #restart-btn:hover { background: #059669; }
+        #controls {
+            position: absolute;
+            bottom: 30px;
+            right: 30px;
+            z-index: 10;
+        }
+        .grid-container {
+            display: grid;
+            grid-template-columns: repeat(3, 60px);
+            grid-gap: 10px;
+        }
+        .btn {
+            width: 60px;
+            height: 60px;
+            background: white;
+            border: 2px solid #cbd5e1;
+            border-radius: 10px;
+            font-size: 24px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        .btn:active { transform: scale(0.95); }
+
+        /* Camera & Canvas Overlay Styling */
+        #webcam-container {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            width: 200px;
+            height: 150px;
+            border-radius: 10px;
+            overflow: hidden;
+            border: 3px solid white;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.3);
+            z-index: 15;
+            background: #222;
+            transform: scaleX(-1); /* Mirror view for natural interaction */
+        }
+        #webcam, #tracking-canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+        #tracking-canvas {
+            z-index: 16;
+        }
+        #gesture-status {
+            position: absolute;
+            bottom: 180px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 5px 12px;
+            border-radius: 20px;
+            font-size: 14px;
+            z-index: 15;
+            pointer-events: none;
+        }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+</head>
+<body>
+
+    <div id="score-board">0</div>
+    <div id="game-container"></div>
+
+    <div id="webcam-container">
+        <video id="webcam" autoplay playsinline muted></video>
+        <canvas id="tracking-canvas"></canvas>
+    </div>
+    <div id="gesture-status">Loading Hand Tracking...</div>
+
+    <div id="game-over-screen">
+        <h1>Game Over</h1>
+        <p>Your Score: <span id="final-score">0</span></p>
+        <button id="restart-btn" onclick="resetGame()">Play Again</button>
+    </div>
+
+    <div id="controls">
+        <div class="grid-container">
+            <div></div>
+            <button class="btn" id="up">▲</button>
+            <div></div>
+            <button class="btn" id="left">◀</button>
+            <button class="btn" id="down">▼</button>
+            <button class="btn" id="right">▶</button>
+        </div>
+    </div>
+
+    <script>
+        // --- 1. Scene setup & Isometric Shadow Map ---
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0xbbf7d0);
+
+        const aspect = window.innerWidth / window.innerHeight;
+        const d = 9;
+        const camera = new THREE.OrthographicCamera(-d * aspect, d * aspect, d, -d, 1, 1000);
+        
+        camera.position.set(12, 16, 12); 
+        camera.lookAt(0, 2, 0);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        document.getElementById('game-container').appendChild(renderer.domElement);
+
+        // --- 2. Accurate Low-Poly Lighting ---
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.65);
+        scene.add(ambientLight);
+
+        const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        dirLight.position.set(15, 30, 10);
+        dirLight.castShadow = true;
+        dirLight.shadow.mapSize.width = 2048;
+        dirLight.shadow.mapSize.height = 2048;
+        dirLight.shadow.camera.left = -20;
+        dirLight.shadow.camera.right = 20;
+        dirLight.shadow.camera.top = 20;
+        dirLight.shadow.camera.bottom = -20;
+        scene.add(dirLight);
+
+        // --- 3. Voxel Object Models Generator ---
+        const laneWidth = 40;
+
+        function createVoxelChicken() {
+            const chickenGroup = new THREE.Group();
+            const body = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.7, 0.7), new THREE.MeshLambertMaterial({ color: 0xffffff }));
+            body.position.y = 0.35; body.castShadow = true; chickenGroup.add(body);
+
+            const comb = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.2, 0.4), new THREE.MeshLambertMaterial({ color: 0xef4444 }));
+            comb.position.set(0, 0.75, 0.05); comb.castShadow = true; chickenGroup.add(comb);
+
+            const beak = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.15, 0.2), new THREE.MeshLambertMaterial({ color: 0xf59e0b }));
+            beak.position.set(0, 0.45, 0.4); beak.castShadow = true; chickenGroup.add(beak);
+            return chickenGroup;
+        }
+
+        function createVoxelCar() {
+            const carGroup = new THREE.Group();
+            const carColors = [0xef4444, 0x3b82f6, 0xf59e0b, 0x10b981, 0x8b5cf6];
+            const baseColor = carColors[Math.floor(Math.random() * carColors.length)];
+
+            const body = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.6, 1.2), new THREE.MeshLambertMaterial({ color: baseColor }));
+            body.position.y = 0.4; body.castShadow = true; carGroup.add(body);
+
+            const cabin = new THREE.Mesh(new THREE.BoxGeometry(1.3, 0.5, 1.1), new THREE.MeshLambertMaterial({ color: 0xffffff }));
+            cabin.position.set(-0.1, 0.9, 0); cabin.castShadow = true; carGroup.add(cabin);
+
+            const wheelGeo = new THREE.BoxGeometry(0.4, 0.4, 1.3);
+            const wheelMat = new THREE.MeshLambertMaterial({ color: 0x1f2937 });
+            const wheel1 = new THREE.Mesh(wheelGeo, wheelMat); wheel1.position.set(-0.6, 0.2, 0);
+            const wheel2 = new THREE.Mesh(wheelGeo, wheelMat); wheel2.position.set(0.6, 0.2, 0);
+            carGroup.add(wheel1, wheel2);
+            return carGroup;
+        }
+
+        function createVoxelTree() {
+            const treeGroup = new THREE.Group();
+            const trunk = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.8, 0.3), new THREE.MeshLambertMaterial({ color: 0x78350f }));
+            trunk.position.y = 0.4; trunk.castShadow = true; treeGroup.add(trunk);
+            
+            const leaves = new THREE.Mesh(new THREE.BoxGeometry(1, 1.4, 1), new THREE.MeshLambertMaterial({ color: 0x15803d }));
+            leaves.position.y = 1.3; leaves.castShadow = true; leaves.receiveShadow = true; treeGroup.add(leaves);
+            return treeGroup;
+        }
+
+        // --- 4. Game Systems Variables ---
+        let chicken, lanes, cars, score, gameActive;
+        let jumpProgress = 1; 
+        let jumpSource = new THREE.Vector3();
+        let jumpTarget = new THREE.Vector3();
+        const jumpSpeed = 0.15;
+        const chickenPos = { x: 0, z: 0 };
+
+        function init() {
+            while(scene.children.length > 2) { scene.remove(scene.children[2]); }
+            lanes = {}; cars = []; score = 0;
+            chickenPos.x = 0; chickenPos.z = 0;
+            gameActive = true; jumpProgress = 1;
+            document.getElementById('score-board').innerText = score;
+            document.getElementById('game-over-screen').style.display = 'none';
+
+            chicken = createVoxelChicken();
+            scene.add(chicken);
+
+            for(let z = -10; z < 25; z++) { generateLane(z, z < 2 ? 'grass' : null); }
+            updateChickenRenderPos();
+        }
+
+        function generateLane(z, forcedType = null) {
+            if(lanes[z]) return;
+            const types = ['grass', 'road', 'road'];
+            const type = forcedType || types[Math.floor(Math.random() * types.length)];
+            const laneGroup = new THREE.Group();
+
+            let matColor = (type === 'grass') ? 0x4ade80 : 0x4b5563;
+            const floor = new THREE.Mesh(new THREE.BoxGeometry(laneWidth, 1, 1), new THREE.MeshLambertMaterial({ color: matColor }));
+            floor.position.y = -0.5; floor.receiveShadow = true; laneGroup.add(floor);
+
+            const treePositions = new Set();
+            let laneSpeed = 0, laneDirection = 0;
+
+            if (type === 'grass') {
+                for (let x = -laneWidth / 2 + 1; x < laneWidth / 2; x++) {
+                    if (z === 0 && x === 0) continue;
+                    if (Math.abs(x) > 3 && Math.random() < 0.45 || Math.random() < 0.12) {
+                        const tree = createVoxelTree(); tree.position.x = x; laneGroup.add(tree);
+                        treePositions.add(x);
+                    }
+                }
+            } else if (type === 'road') {
+                laneSpeed = 0.06 + Math.random() * 0.08;
+                laneDirection = Math.random() > 0.5 ? 1 : -1;
+            }
+
+            laneGroup.position.z = z;
+            scene.add(laneGroup);
+            lanes[z] = { type, group: laneGroup, speed: laneSpeed, direction: laneDirection, trees: treePositions, lastVehicleSpawn: 0 };
+        }
+
+        function updateChickenRenderPos() {
+            chicken.position.set(chickenPos.x, 0, chickenPos.z);
+        }
+
+        function move(dir) {
+            if (!gameActive || jumpProgress < 1) return;
+            let nextX = chickenPos.x; let nextZ = chickenPos.z;
+            let targetRotation = chicken.rotation.y;
+
+            if (dir === 'up') { nextZ += 1; targetRotation = 0; }
+            if (dir === 'down') { nextZ -= 1; targetRotation = Math.PI; }
+            if (dir === 'left') { nextX += 1; targetRotation = Math.PI / 2; }
+            if (dir === 'right') { nextX -= 1; targetRotation = -Math.PI / 2; }
+
+            if (Math.abs(nextX) > Math.floor(laneWidth / 2) - 1) return;
+            generateLane(nextZ);
+            if (lanes[nextZ] && lanes[nextZ].trees.has(nextX)) return;
+
+            jumpSource.copy(chicken.position);
+            jumpTarget.set(nextX, 0, nextZ);
+            chicken.rotation.y = targetRotation;
+            jumpProgress = 0;
+
+            if (nextZ > score) {
+                score = nextZ;
+                document.getElementById('score-board').innerText = score;
+            }
+            chickenPos.x = nextX; chickenPos.z = nextZ;
+        }
+
+        function handleVehicles(timestamp) {
+            for (let z in lanes) {
+                const lane = lanes[z]; if (lane.type !== 'road') continue;
+                if (timestamp - lane.lastVehicleSpawn > 1500 + Math.random() * 2000) {
+                    const car = createVoxelCar();
+                    car.position.set(-lane.direction * (laneWidth / 2 + 2), 0, parseFloat(z));
+                    car.rotation.y = lane.direction > 0 ? 0 : Math.PI;
+                    scene.add(car);
+                    cars.push({ mesh: car, speed: lane.speed, direction: lane.direction, zIndex: parseFloat(z) });
+                    lane.lastVehicleSpawn = timestamp;
+                }
+            }
+            for (let i = cars.length - 1; i >= 0; i--) {
+                const car = cars[i]; car.mesh.position.x += car.speed * car.direction;
+                if (car.zIndex === chickenPos.z && Math.abs(car.mesh.position.x - chicken.position.x) < 1.3) {
+                    gameOver();
+                }
+                if (Math.abs(car.mesh.position.x) > laneWidth / 2 + 5) {
+                    scene.remove(car.mesh); cars.splice(i, 1);
+                }
+            }
+        }
+
+        function gameOver() { gameActive = false; document.getElementById('final-score').innerText = score; document.getElementById('game-over-screen').style.display = 'block'; }
+        function resetGame() { init(); }
+
+        window.addEventListener('keydown', (e) => {
+            if (e.key === 'ArrowUp' || e.key === 'w') move('up');
+            if (e.key === 'ArrowDown' || e.key === 's') move('down');
+            if (e.key === 'ArrowLeft' || e.key === 'a') move('left');
+            if (e.key === 'ArrowRight' || e.key === 'd') move('right');
+        });
+
+        // --- 5. MediaPipe Hand & Point Overlay Tracking System ---
+        const videoElement = document.getElementById('webcam');
+        const canvasElement = document.getElementById('tracking-canvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        const statusElement = document.getElementById('gesture-status');
+        let lastGesture = "none";
+
+        function onResults(results) {
+            // Synchronize canvas dimension updates with camera feed resolution
+            if (canvasElement.width !== videoElement.videoWidth) {
+                canvasElement.width = videoElement.videoWidth;
+                canvasElement.height = videoElement.videoHeight;
+            }
+
+            // Reset/Clear rendering surface context frame loop 
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                const landmarks = results.multiHandLandmarks[0];
+                
+                // Draw skeleton structural paths and tracking point joints 
+                drawConnectors(canvasCtx, landmarks, HAND_CONNECTIONS, {color: '#10b981', lineWidth: 4});
+                drawLandmarks(canvasCtx, landmarks, {color: '#ef4444', lineWidth: 2, radius: 4});
+
+                // Evaluate extension matrices dynamically via key point indexes
+                const indexExtended  = landmarks[8].y < landmarks[6].y;
+                const middleExtended = landmarks[12].y < landmarks[10].y;
+                const ringExtended   = landmarks[16].y < landmarks[14].y;
+                const pinkyExtended  = landmarks[20].y < landmarks[18].y;
+
+                let currentGesture = "none";
+
+                if (indexExtended && !middleExtended && !ringExtended && !pinkyExtended) {
+                    currentGesture = "up";
+                } else if (middleExtended && !indexExtended && !ringExtended && !pinkyExtended) {
+                    currentGesture = "down";
+                } else if (ringExtended && !indexExtended && !middleExtended && !pinkyExtended) {
+                    currentGesture = "left";
+                } else if (pinkyExtended && !indexExtended && !middleExtended && !ringExtended) {
+                    currentGesture = "right";
+                }
+
+                if (currentGesture !== "none" && currentGesture !== lastGesture) {
+                    move(currentGesture);
+                    statusElement.innerText = "Gesture: " + currentGesture.toUpperCase();
+                } else if (currentGesture === "none") {
+                    statusElement.innerText = "Ready (Show single finger)";
+                }
+                lastGesture = currentGesture;
+            } else {
+                if (lastGesture !== "none") {
+                    lastGesture = "none";
+                    statusElement.innerText = "No hand detected";
+                }
+            }
+        }
+
+        const hands = new Hands({
+            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+        });
+
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.6,
+            minTrackingConfidence: 0.6
+        });
+        hands.onResults(onResults);
+
+        const cameraFeed = new Camera(videoElement, {
+            onFrame: async () => { await hands.send({ image: videoElement }); },
+            width: 320,
+            height: 240
+        });
+        
+        cameraFeed.start()
+            .then(() => statusElement.innerText = "Hand Tracking Ready!")
+            .catch(() => statusElement.innerText = "Webcam error");
+
+        // --- 6. Unified Frame Animation Loop ---
+        function animate(timestamp) {
+            requestAnimationFrame(animate);
+            if (gameActive) {
+                handleVehicles(timestamp);
+                if (jumpProgress < 1) {
+                    jumpProgress += jumpSpeed;
+                    if (jumpProgress > 1) jumpProgress = 1;
+                    chicken.position.lerpVectors(jumpSource, jumpTarget, jumpProgress);
+                    chicken.position.y = Math.sin(jumpProgress * Math.PI) * 0.5;
+                }
+                const targetCamX = chicken.position.x + 12;
+                const targetCamZ = chicken.position.z + 12;
+                camera.position.x += (targetCamX - camera.position.x) * 0.08;
+                camera.position.z += (targetCamZ - camera.position.z) * 0.08;
+                dirLight.position.set(camera.position.x + 3, camera.position.y + 14, camera.position.z - 2);
+            }
+            renderer.render(scene, camera);
+        }
+
+        init();
+        requestAnimationFrame(animate);
+    </script>
+</body>
+</html>
